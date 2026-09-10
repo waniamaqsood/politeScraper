@@ -183,6 +183,7 @@ def main():
         print("\n--- Complete raw record ---")
         print(all_details[0])
 
+    return all_details
 
 if __name__ == "__main__":
     main()
