@@ -1,8 +1,17 @@
-from typing import Any, Optional
-from pathlib import Path
 import json
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
 from pydantic import BaseModel, ValidationError
+
 from stage3 import main as get_all_details
+
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+OUTPUT_DIR = BASE_DIR / "output"
+
 
 class BookRecord(BaseModel):
     title: str
@@ -16,13 +25,29 @@ class BookRecord(BaseModel):
     fetched_at: str
 
 
-def convert_text_nums(all_details: list[dict[str, Any]]):
-    for book in all_details:
-        price_as_text = book["price_text"]
-        only_price = price_as_text.replace("£", "").replace("Â", "").strip()
-        price_as_float = float(only_price)
-        book["price_gbp"] = price_as_float
-    return all_details
+def convert_text_nums(
+    all_details: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+
+    converted_records = []
+
+    for detail in all_details:
+
+        price_text = detail.get("price_text")
+
+        if price_text:
+            price_gbp = float(
+                price_text.replace("£", "").strip()
+            )
+        else:
+            price_gbp = None
+
+        detail["price_gbp"] = price_gbp
+
+        converted_records.append(detail)
+
+    return converted_records
+
 
 def validate_records(
     all_details: list[dict[str, Any]]
@@ -30,27 +55,22 @@ def validate_records(
 
     valid_records = []
     errors = []
-    seen_urls = set()
 
-    for book in all_details:
-        product_url = book.get("product_url")
-        if product_url in seen_urls:
-            continue
-        seen_urls.add(product_url)
+    for detail in all_details:
 
         try:
-            validated_book = BookRecord.model_validate(book)
+            record = BookRecord.model_validate(detail)
+
             valid_records.append(
-                validated_book.model_dump()
+                record.model_dump()
             )
 
         except ValidationError as error:
-            errors.append(
-                {
-                    "record": book,
-                    "reason": str(error)
-                }
-            )
+
+            errors.append({
+                "product_url": detail.get("product_url"),
+                "errors": error.errors()
+            })
 
     return valid_records, errors
 
@@ -60,57 +80,176 @@ def write_output(
     errors
 ):
 
-    output_dir = Path(__file__).resolve().parent.parent / "output"
-    output_dir.mkdir(
+    OUTPUT_DIR.mkdir(
         parents=True,
         exist_ok=True
     )
 
-    books_path = output_dir / "books.json"
-    errors_path = output_dir / "errors.json"
+    books_path = OUTPUT_DIR / "books.json"
 
     with open(
         books_path,
         "w",
         encoding="utf-8"
-    ) as f:
+    ) as file:
 
         json.dump(
             valid_records,
-            f,
+            file,
             indent=4,
             ensure_ascii=False
         )
+
+    errors_path = OUTPUT_DIR / "errors.json"
 
     with open(
         errors_path,
         "w",
         encoding="utf-8"
-    ) as f:
+    ) as file:
 
         json.dump(
             errors,
-            f,
+            file,
             indent=4,
             ensure_ascii=False
         )
 
 
+def write_run_report(
+    run_stats,
+    valid_records,
+    errors,
+    start_timestamp,
+    duration
+):
+
+    report = {
+        "start_time": start_timestamp,
+        "duration_seconds": round(
+            duration,
+            2
+        ),
+        "pages_fetched": run_stats[
+            "pages_fetched"
+        ],
+        "cache_hits": run_stats[
+            "cache_hits"
+        ],
+        "valid_records": len(
+            valid_records
+        ),
+        "invalid_records": len(
+            errors
+        ),
+        "failed_pages": len(
+            run_stats["failed_pages"]
+        )
+    }
+
+    report_path = OUTPUT_DIR / "run-report.json"
+
+    with open(
+        report_path,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            report,
+            file,
+            indent=4,
+            ensure_ascii=False
+        )
+
+    return report
+
+
 def main():
 
-    all_details = get_all_details()
-    all_details = convert_text_nums(all_details)
-    valid_records, errors = validate_records(all_details)
-    write_output(valid_records, errors)
+    start_time = datetime.now(
+        timezone.utc
+    )
 
-    print("\n--- Checkpoint ---")
-    print(f"input_records={len(all_details)}")
-    print(f"valid_records={len(valid_records)}")
-    print(f"errors={len(errors)}")
+    start_timestamp = start_time.isoformat()
 
-    print("\nOutput written to:")
-    print("output/books.json")
-    print("output/errors.json")
+    start_counter = time.perf_counter()
+
+    # Stage 3 performs the scraping.
+    # It returns both the scraped records
+    # and the fetch statistics.
+    all_details, run_stats = get_all_details()
+
+    # Convert text values such as "£50.10"
+    # into the numeric price_gbp field.
+    all_details = convert_text_nums(
+        all_details
+    )
+
+    # Validate every scraped record.
+    valid_records, errors = validate_records(
+        all_details
+    )
+
+    # Write books.json and errors.json.
+    write_output(
+        valid_records,
+        errors
+    )
+
+    duration = (
+        time.perf_counter()
+        - start_counter
+    )
+
+    # Write the final Stage 5 run report.
+    report = write_run_report(
+        run_stats=run_stats,
+        valid_records=valid_records,
+        errors=errors,
+        start_timestamp=start_timestamp,
+        duration=duration
+    )
+
+    print("\n--- Validation Checkpoint ---")
+
+    print(
+        f"valid_records={len(valid_records)}"
+    )
+
+    print(
+        f"invalid_records={len(errors)}"
+    )
+
+    print(
+        f"failed_pages="
+        f"{len(run_stats['failed_pages'])}"
+    )
+
+    print("\n--- Run Report ---")
+
+    print(
+        json.dumps(
+            report,
+            indent=4
+        )
+    )
+
+    print("\nOutput files written:")
+
+    print(
+        OUTPUT_DIR / "books.json"
+    )
+
+    print(
+        OUTPUT_DIR / "errors.json"
+    )
+
+    print(
+        OUTPUT_DIR / "run-report.json"
+    )
+
+    return valid_records, errors
 
 
 if __name__ == "__main__":

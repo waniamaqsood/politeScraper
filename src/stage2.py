@@ -85,21 +85,14 @@ def parse_content(html, page_url):
 def main():
 
     current_url = BASE_URL
-
-    # product URL -> catalogue page it came from
     book_sources = {}
-
     catalogue_pages = 0
 
     while catalogue_pages < 3:
-
         catalogue_pages += 1
-
         cache_path = get_cache_path(catalogue_pages)
-
         print(f"\nProcessing catalogue page {catalogue_pages}")
         print(f"URL: {current_url}")
-
         html = fetch_and_cache(
             current_url,
             cache_path
